@@ -21,17 +21,39 @@ class SmsReceiver : BroadcastReceiver() {
                 val sender = sms.displayOriginatingAddress
                 val body = sms.messageBody
                 val timestamp = System.currentTimeMillis()
-                
-                // Save message to SharedPreferences
-                saveMessage(context, sender, body, timestamp)
-                
-                // Update notification
-                updateServiceNotification(context, sender, body)
-                
-                // Launch the app
-                launchApp(context)
+
+                // Log the incoming message
+                Log.d("SmsReceiver", "SMS Received from: $sender")
+                Log.d("SmsReceiver", "Message: $body")
+
+                // Check if message matches the template
+                if (matchesTemplate(body)) {
+                    Log.d("SmsReceiver", "Message matches template - processing")
+                    
+                    // Save message to SharedPreferences
+                    saveMessage(context, sender, body, timestamp)
+                    
+                    // Update notification
+                    updateServiceNotification(context, sender, body)
+                    
+                    // Launch the app
+                    launchApp(context)
+                } else {
+                    Log.d("SmsReceiver", "Message does not match template - ignoring")
+                }
             }
         }
+    }
+
+    private fun matchesTemplate(message: String): Boolean {
+        // Regular expression to match the template
+        val pattern1 = """INR \d+(\.\d+)? debited[\s\S]*A/c no\. XX1133[\s\S]*"""
+    
+        // Pattern for the second message type (Sent Rs from Kotak Bank)
+        val pattern2 = """Sent Rs\.(\d+(\.\d+)?) from Kotak Bank[\s\S]*"""
+
+        return Regex(pattern1).containsMatchIn(message) || 
+           Regex(pattern2).containsMatchIn(message)
     }
     
     private fun saveMessage(context: Context, sender: String, body: String, timestamp: Long) {

@@ -35,6 +35,53 @@ class SmsMessage {
       timeReceived: DateTime.parse(json['timeReceived']),
     );
   }
+  
+  // Extract the amount from the SMS body
+  double? extractAmount() {
+    final regExpINR = RegExp(r'INR (\d+(\.\d+)?) debited');
+    final matchINR = regExpINR.firstMatch(body);
+    if (matchINR != null && matchINR.groupCount >= 1) {
+      return double.tryParse(matchINR.group(1) ?? '0');
+    }
+
+    // Pattern for Sent Rs messages
+    final regExpRs = RegExp(r'Sent Rs\.(\d+(\.\d+)?) from Kotak Bank');
+    final matchRs = regExpRs.firstMatch(body);
+    if (matchRs != null && matchRs.groupCount >= 1) {
+      return double.tryParse(matchRs.group(1) ?? '0');
+    }
+
+    return null;
+  }
+}
+
+// New model for expense entries
+class ExpenseEntry {
+  final double amount;
+  final String description;
+  final DateTime date;
+
+  ExpenseEntry({
+    required this.amount,
+    required this.description,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'amount': amount,
+      'description': description,
+      'date': date.toIso8601String(),
+    };
+  }
+
+  factory ExpenseEntry.fromJson(Map<String, dynamic> json) {
+    return ExpenseEntry(
+      amount: json['amount'],
+      description: json['description'],
+      date: DateTime.parse(json['date']),
+    );
+  }
 }
 
 void main() async {
@@ -52,45 +99,73 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SMS Reader',
+      debugShowCheckedModeBanner: false,
+      title: 'Money Manager',
       theme: ThemeData(
-        primarySwatch: Colors.blue,
+        primarySwatch: Colors.green,
         useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.green,
+          foregroundColor: Colors.white,
+          elevation: 2,
+        ),
       ),
-      home: const SmsReaderScreen(),
+      home: const MoneyManagerScreen(),
     );
   }
 }
 
-class SmsReaderScreen extends StatefulWidget {
-  const SmsReaderScreen({Key? key}) : super(key: key);
+class MoneyManagerScreen extends StatefulWidget {
+  const MoneyManagerScreen({Key? key}) : super(key: key);
 
   @override
-  State<SmsReaderScreen> createState() => _SmsReaderScreenState();
+  State<MoneyManagerScreen> createState() => _MoneyManagerScreenState();
 }
 
-class _SmsReaderScreenState extends State<SmsReaderScreen> {
+class _MoneyManagerScreenState extends State<MoneyManagerScreen>
+    with SingleTickerProviderStateMixin {
   static const platform = MethodChannel('com.example.new_notif/sms_reader');
   final _smsPlugin = Readsms();
   List<SmsMessage> messages = [];
-  bool _serviceRunning = false;
+  List<ExpenseEntry> expenses = [];
+
+  // Controllers
+  final TextEditingController _amountController = TextEditingController();
+  final TextEditingController _descriptionController = TextEditingController();
+
+  // TabController
+  late TabController _tabController;
 
   @override
   void initState() {
     super.initState();
-    _checkServiceStatus();
+    _tabController = TabController(length: 2, vsync: this);
     _loadMessages();
+    _loadExpenses();
     _startSmsListener();
+    _startBackgroundService();
+
+    // Check if app was launched from notification with an SMS
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkForLatestSms();
+    });
   }
-  
-  Future<void> _checkServiceStatus() async {
+
+  Future<void> _checkForLatestSms() async {
+    if (messages.isNotEmpty) {
+      final latestMessage = messages.first;
+      final amount = latestMessage.extractAmount();
+      if (amount != null) {
+        _amountController.text = amount.toString();
+      }
+    }
+  }
+
+  Future<void> _startBackgroundService() async {
     try {
-      final bool running = await platform.invokeMethod('isServiceRunning');
-      setState(() {
-        _serviceRunning = running;
-      });
+      await platform.invokeMethod('startService');
     } on PlatformException catch (e) {
-      debugPrint("Failed to check service status: ${e.message}");
+      debugPrint("Failed to start background service: ${e.message}");
     }
   }
   
@@ -103,6 +178,11 @@ class _SmsReaderScreenState extends State<SmsReaderScreen> {
   }
   
   Future<void> _handleNewSms(String body, String sender, DateTime timeReceived) async {
+    // Only process messages that match the template
+    if (!_matchesTemplate(body)) {
+      return;
+    }
+    
     // Create a message object
     final message = SmsMessage(
       body: body,
@@ -113,29 +193,33 @@ class _SmsReaderScreenState extends State<SmsReaderScreen> {
     // Save message
     await _saveMessage(message);
     
+    // Extract amount and populate the input field
+    final amount = message.extractAmount();
+    if (amount != null) {
+      _amountController.text = amount.toString();
+    }
+    
     // Refresh UI
     setState(() {
       _loadMessages();
     });
   }
+  
+  bool _matchesTemplate(String message) {
+    // Regular expression to match the template
+    RegExp regex1 = RegExp(
+      r'INR \d+(\.\d+)? debited[\s\S]*A/c no\. XX1133[\s\S]*',
+    );
+    
+    // Regular expression to match the second template (Sent Rs from Kotak Bank)
+    RegExp regex2 = RegExp(r'Sent Rs\.(\d+(\.\d+)?) from Kotak Bank[\s\S]*');
 
-  Future<void> _toggleService() async {
-    try {
-      if (_serviceRunning) {
-        await platform.invokeMethod('stopService');
-      } else {
-        await platform.invokeMethod('startService');
-      }
-      
-      _checkServiceStatus();
-    } on PlatformException catch (e) {
-      debugPrint("Failed to toggle service: ${e.message}");
-    }
+    return regex1.hasMatch(message) || regex2.hasMatch(message);
   }
 
   Future<void> _loadMessages() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedMessages = prefs.getStringList('sms_messages') ?? [];
+    final savedMessages = prefs.getStringList('sms_messages_prefs') ?? [];
     
     setState(() {
       messages = savedMessages
@@ -147,9 +231,24 @@ class _SmsReaderScreenState extends State<SmsReaderScreen> {
     });
   }
   
+  Future<void> _loadExpenses() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedExpenses = prefs.getStringList('expenses_data') ?? [];
+
+    setState(() {
+      expenses =
+          savedExpenses
+              .map((expense) => ExpenseEntry.fromJson(jsonDecode(expense)))
+              .toList();
+
+      // Sort expenses by date (newest first)
+      expenses.sort((a, b) => b.date.compareTo(a.date));
+    });
+  }
+  
   Future<void> _saveMessage(SmsMessage message) async {
     final prefs = await SharedPreferences.getInstance();
-    final savedMessagesJson = prefs.getStringList('sms_messages') ?? [];
+    final savedMessagesJson = prefs.getStringList('sms_messages_prefs') ?? [];
     
     final allMessages = savedMessagesJson
         .map((msg) => SmsMessage.fromJson(jsonDecode(msg)))
@@ -166,35 +265,88 @@ class _SmsReaderScreenState extends State<SmsReaderScreen> {
         .map((msg) => jsonEncode(msg.toJson()))
         .toList();
         
-    await prefs.setStringList('sms_messages', updatedMessagesJson);
+    await prefs.setStringList('sms_messages_prefs', updatedMessagesJson);
   }
-  
-  Future<void> _clearMessages() async {
+
+  Future<void> _saveExpense(ExpenseEntry expense) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('sms_messages', []);
-    
+    final savedExpensesJson = prefs.getStringList('expenses_data') ?? [];
+
+    final allExpenses =
+        savedExpensesJson
+            .map((exp) => ExpenseEntry.fromJson(jsonDecode(exp)))
+            .toList();
+
+    // Add new expense
+    allExpenses.add(expense);
+
+    // Sort by date (newest first)
+    allExpenses.sort((a, b) => b.date.compareTo(a.date));
+
+    // Save back to SharedPreferences
+    final updatedExpensesJson =
+        allExpenses.map((exp) => jsonEncode(exp.toJson())).toList();
+
+    await prefs.setStringList('expenses_data', updatedExpensesJson);
+
+    // Refresh the list
+    _loadExpenses();
+  }
+
+  Future<void> _clearExpenses() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('expenses_data', []);
+
     setState(() {
-      messages.clear();
+      expenses.clear();
     });
   }
 
-  String _formatTime(DateTime time) {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final messageDate = DateTime(time.year, time.month, time.day);
+  Future<void> _submitExpense() async {
+    // Validate input
+    final amountText = _amountController.text.trim();
+    final description = _descriptionController.text.trim();
 
-    if (messageDate == today) {
-      return DateFormat.jm().format(time); // Today: 3:45 PM
-    } else if (messageDate == today.subtract(const Duration(days: 1))) {
-      return 'Yesterday, ${DateFormat.jm().format(time)}'; // Yesterday, 3:45 PM
-    } else {
-      return DateFormat('MMM d, y - h:mm a').format(time); // Jan 1, 2023 - 3:45 PM
+    if (amountText.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Please enter an amount')));
+      return;
     }
+
+    final amount = double.tryParse(amountText);
+    if (amount == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid amount')),
+      );
+      return;
+    }
+
+    // Create and save expense
+    final expense = ExpenseEntry(
+      amount: amount,
+      description: description.isEmpty ? 'No description' : description,
+      date: DateTime.now(),
+    );
+
+    await _saveExpense(expense);
+
+    // Clear the fields
+    _amountController.clear();
+    _descriptionController.clear();
+
+    // Show confirmation
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Expense saved successfully')));
   }
   
   @override
   void dispose() {
     _smsPlugin.dispose();
+    _amountController.dispose();
+    _descriptionController.dispose();
+    _tabController.dispose();
     super.dispose();
   }
 
@@ -202,81 +354,284 @@ class _SmsReaderScreenState extends State<SmsReaderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('SMS Reader'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadMessages,
-          ),
-          IconButton(
-            icon: const Icon(Icons.delete_sweep),
-            onPressed: () {
-              showDialog(
-                context: context,
-                builder: (context) => AlertDialog(
-                  title: const Text('Clear Messages'),
-                  content: const Text('Are you sure you want to delete all saved messages?'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('CANCEL'),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        _clearMessages();
-                        Navigator.pop(context);
-                      },
-                      child: const Text('DELETE'),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
+        title: const Text('Money Manager'),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(icon: Icon(Icons.money), text: 'Add Expense'),
+            Tab(icon: Icon(Icons.history), text: 'History'),
+          ],
+          labelColor: Colors.white,
+          indicatorColor: Colors.white,
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          // Add Expense Tab
+          _buildAddExpenseTab(),
+
+          // History Tab
+          _buildHistoryTab(),
         ],
       ),
-      body: messages.isEmpty
-          ? const Center(
-              child: Text(
-                'No messages yet',
-                style: TextStyle(fontSize: 18, color: Colors.grey),
-              ),
-            )
-          : ListView.separated(
-              itemCount: messages.length,
-              separatorBuilder: (context, index) => const Divider(),
-              itemBuilder: (context, index) {
-                final message = messages[index];
-                return ListTile(
-                  title: Text(
-                    message.sender,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+    );
+  }
+
+  Widget _buildAddExpenseTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Card with expense input fields
+          Card(
+            elevation: 4,
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'New Expense',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      color: Colors.green[800],
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(message.body),
-                      const SizedBox(height: 4),
-                      Text(
-                        _formatTime(message.timeReceived),
-                        style: TextStyle(
-                          color: Colors.grey[600],
-                          fontSize: 12,
+                  const SizedBox(height: 20),
+
+                  // Amount input
+                  TextField(
+                    controller: _amountController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: 'Amount (INR)',
+                      prefixIcon: const Icon(Icons.currency_rupee),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Description input
+                  TextField(
+                    controller: _descriptionController,
+                    decoration: InputDecoration(
+                      labelText: 'What was it for?',
+                      prefixIcon: const Icon(Icons.description),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Submit button
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: _submitExpense,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
                         ),
                       ),
-                    ],
+                      child: const Text(
+                        'SAVE EXPENSE',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
                   ),
-                  isThreeLine: true,
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Recent SMS section
+          if (messages.isNotEmpty) ...[
+            Text(
+              'Recent Transactions',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+
+            // List of recent SMS messages
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: messages.length.clamp(
+                0,
+                3,
+              ), // Show up to 3 recent messages
+              itemBuilder: (context, index) {
+                final message = messages[index];
+                final amount = message.extractAmount();
+
+                return Card(
+                  elevation: 2,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  child: ListTile(
+                    leading: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Colors.green[100],
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.payment, color: Colors.green),
+                    ),
+                    title: Text(message.sender),
+                    subtitle: Text(
+                      '${DateFormat('MMM d, h:mm a').format(message.timeReceived)}\n${message.body}',
+                    ),
+                    trailing:
+                        amount != null
+                            ? Text(
+                              '₹${amount.toStringAsFixed(2)}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                              ),
+                            )
+                            : null,
+                    isThreeLine: true,
+                    onTap: () {
+                      if (amount != null) {
+                        _amountController.text = amount.toString();
+                      }
+                    },
+                  ),
                 );
               },
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _toggleService,
-        tooltip: 'Toggle Background Service',
-        child: Icon(
-          _serviceRunning ? Icons.stop : Icons.play_arrow,
-        ),
+          ],
+        ],
       ),
+    );
+  }
+
+  Widget _buildHistoryTab() {
+    return Column(
+      children: [
+        // Header with clear button
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Expense History',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              TextButton.icon(
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    builder:
+                        (context) => AlertDialog(
+                          title: const Text('Clear All Expenses'),
+                          content: const Text(
+                            'Are you sure you want to delete all expenses?',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text('CANCEL'),
+                            ),
+                            TextButton(
+                              onPressed: () {
+                                _clearExpenses();
+                                Navigator.pop(context);
+                              },
+                              child: const Text('DELETE'),
+                            ),
+                          ],
+                        ),
+                  );
+                },
+                icon: const Icon(Icons.delete_sweep, color: Colors.red),
+                label: const Text(
+                  'Clear All',
+                  style: TextStyle(color: Colors.red),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Expense list
+        Expanded(
+          child:
+              expenses.isEmpty
+                  ? const Center(
+                    child: Text(
+                      'No expenses yet',
+                      style: TextStyle(fontSize: 18, color: Colors.grey),
+                    ),
+                  )
+                  : ListView.builder(
+                    itemCount: expenses.length,
+                    itemBuilder: (context, index) {
+                      final expense = expenses[index];
+
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 4,
+                        ),
+                        child: ListTile(
+                          leading: Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: Colors.green[50],
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.receipt_long,
+                              color: Colors.green,
+                            ),
+                          ),
+                          title: Text(
+                            '₹${expense.amount.toStringAsFixed(2)}',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(expense.description),
+                              Text(
+                                DateFormat(
+                                  'MMM d, y - h:mm a',
+                                ).format(expense.date),
+                                style: TextStyle(
+                                  color: Colors.grey[600],
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                          isThreeLine: true,
+                        ),
+                      );
+                    },
+                  ),
+        ),
+      ],
     );
   }
 }
