@@ -55,16 +55,18 @@ class SmsMessage {
   }
 }
 
-// New model for expense entries
+// New model for expense entries with category field
 class ExpenseEntry {
   final double amount;
   final String description;
   final DateTime date;
+  final String category;
 
   ExpenseEntry({
     required this.amount,
     required this.description,
     required this.date,
+    required this.category,
   });
 
   Map<String, dynamic> toJson() {
@@ -72,6 +74,7 @@ class ExpenseEntry {
       'amount': amount,
       'description': description,
       'date': date.toIso8601String(),
+      'category': category,
     };
   }
 
@@ -80,6 +83,8 @@ class ExpenseEntry {
       amount: json['amount'],
       description: json['description'],
       date: DateTime.parse(json['date']),
+      category:
+          json['category'] ?? 'Other', // Default for backward compatibility
     );
   }
 }
@@ -128,6 +133,12 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
   final _smsPlugin = Readsms();
   List<SmsMessage> messages = [];
   List<ExpenseEntry> expenses = [];
+
+  // List of available categories
+  final List<String> categories = ['Food', 'Travel', 'Rent', 'Cloth', 'Other'];
+
+  // Currently selected category
+  String? selectedCategory;
 
   // Controllers
   final TextEditingController _amountController = TextEditingController();
@@ -305,12 +316,18 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
   Future<void> _submitExpense() async {
     // Validate input
     final amountText = _amountController.text.trim();
-    final description = _descriptionController.text.trim();
-
+    
     if (amountText.isEmpty) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Please enter an amount')));
+      return;
+    }
+
+    if (selectedCategory == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Please select a category')));
       return;
     }
 
@@ -322,11 +339,23 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
       return;
     }
 
+    // Get description based on category
+    String description;
+    if (selectedCategory == 'Other') {
+      description = _descriptionController.text.trim();
+      if (description.isEmpty) {
+        description = 'Other';
+      }
+    } else {
+      description = selectedCategory!;
+    }
+
     // Create and save expense
     final expense = ExpenseEntry(
       amount: amount,
-      description: description.isEmpty ? 'No description' : description,
+      description: description,
       date: DateTime.now(),
+      category: selectedCategory!,
     );
 
     await _saveExpense(expense);
@@ -334,6 +363,9 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
     // Clear the fields
     _amountController.clear();
     _descriptionController.clear();
+    setState(() {
+      selectedCategory = null;
+    });
 
     // Show confirmation
     ScaffoldMessenger.of(
@@ -417,18 +449,58 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
                   ),
                   const SizedBox(height: 16),
 
-                  // Description input
-                  TextField(
-                    controller: _descriptionController,
-                    decoration: InputDecoration(
-                      labelText: 'What was it for?',
-                      prefixIcon: const Icon(Icons.description),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
+                  // Category selection
+                  Text(
+                    'Select Category',
+                    style: TextStyle(fontSize: 16, color: Colors.grey[700]),
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Category buttons
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children:
+                        categories.map((category) {
+                          final isSelected = selectedCategory == category;
+                          return ChoiceChip(
+                            label: Text(category),
+                            selected: isSelected,
+                            onSelected: (selected) {
+                              setState(() {
+                                selectedCategory = selected ? category : null;
+                              });
+                            },
+                            backgroundColor: Colors.grey[200],
+                            selectedColor: Colors.green[100],
+                            labelStyle: TextStyle(
+                              color:
+                                  isSelected
+                                      ? Colors.green[800]
+                                      : Colors.black87,
+                              fontWeight:
+                                  isSelected
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                            ),
+                          );
+                        }).toList(),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Description input - only visible when "Other" is selected
+                  if (selectedCategory == 'Other')
+                    TextField(
+                      controller: _descriptionController,
+                      decoration: InputDecoration(
+                        labelText: 'What was it for?',
+                        prefixIcon: const Icon(Icons.description),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 24),
+                  if (selectedCategory == 'Other') const SizedBox(height: 16),
 
                   // Submit button
                   SizedBox(
@@ -458,67 +530,6 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
           ),
 
           const SizedBox(height: 20),
-
-          // Recent SMS section
-          if (messages.isNotEmpty) ...[
-            Text(
-              'Recent Transactions',
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-
-            // List of recent SMS messages
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: messages.length.clamp(
-                0,
-                3,
-              ), // Show up to 3 recent messages
-              itemBuilder: (context, index) {
-                final message = messages[index];
-                final amount = message.extractAmount();
-
-                return Card(
-                  elevation: 2,
-                  margin: const EdgeInsets.only(bottom: 8),
-                  child: ListTile(
-                    leading: Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.green[100],
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.payment, color: Colors.green),
-                    ),
-                    title: Text(message.sender),
-                    subtitle: Text(
-                      '${DateFormat('MMM d, h:mm a').format(message.timeReceived)}\n${message.body}',
-                    ),
-                    trailing:
-                        amount != null
-                            ? Text(
-                              '₹${amount.toStringAsFixed(2)}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                              ),
-                            )
-                            : null,
-                    isThreeLine: true,
-                    onTap: () {
-                      if (amount != null) {
-                        _amountController.text = amount.toString();
-                      }
-                    },
-                  ),
-                );
-              },
-            ),
-          ],
         ],
       ),
     );
@@ -588,6 +599,25 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
                     itemBuilder: (context, index) {
                       final expense = expenses[index];
 
+                      // Get icon based on category
+                      IconData categoryIcon;
+                      switch (expense.category) {
+                        case 'Food':
+                          categoryIcon = Icons.restaurant;
+                          break;
+                        case 'Travel':
+                          categoryIcon = Icons.directions_car;
+                          break;
+                        case 'Rent':
+                          categoryIcon = Icons.home;
+                          break;
+                        case 'Cloth':
+                          categoryIcon = Icons.shopping_bag;
+                          break;
+                        default:
+                          categoryIcon = Icons.receipt_long;
+                      }
+
                       return Card(
                         margin: const EdgeInsets.symmetric(
                           horizontal: 16,
@@ -601,8 +631,7 @@ class _MoneyManagerScreenState extends State<MoneyManagerScreen>
                               color: Colors.green[50],
                               shape: BoxShape.circle,
                             ),
-                            child: const Icon(
-                              Icons.receipt_long,
+                            child: Icon(categoryIcon,
                               color: Colors.green,
                             ),
                           ),
